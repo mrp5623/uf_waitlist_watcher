@@ -16,8 +16,10 @@ jobs:
         run: python3 watch_waitlist.py
         env:
           UF_TERM: ${{ vars.UF_TERM }}              # repo variable, e.g. 2271
-          COURSE_CODE: ${{ vars.COURSE_CODE }}      # repo variable, e.g. COP4600
-          CLASS_NUMBER: ${{ vars.CLASS_NUMBER }}    # repo variable, optional
+          COURSE_CODES: ${{ vars.COURSE_CODES }}    # repo variable, comma-separated, e.g. COP4600,PHI3681
+          CLASS_NUMBERS: ${{ vars.CLASS_NUMBERS }}  # repo variable, optional: only these sections of their course
+          COURSE_CODE: ${{ vars.COURSE_CODE }}      # older single-course setting, still honored
+          CLASS_NUMBER: ${{ vars.CLASS_NUMBER }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}     # secret, so it's hidden in a public repo
           HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}  # secret, optional
           # Daily run and manual runs send the "OK" push; the 15-minute runs stay quiet unless there's news.

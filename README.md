@@ -25,8 +25,11 @@ Your topic and ping URL go in as secrets, which stay hidden even in a public rep
 
 **4. Settings.** Repo → Settings → Secrets and variables → Actions:
 
-- Variables tab: `UF_TERM` = `2271` (Spring 2027), `COURSE_CODE` = e.g. `COP4600`,
-  and `CLASS_NUMBER` only if the course lists more than one section (the script will tell you if it's needed).
+- Variables tab: `UF_TERM` = `2271` (Spring 2027), `COURSE_CODES` = comma-separated, e.g. `COP4600,PHI3681`.
+  Every section of each course is watched by default.
+  Optional `CLASS_NUMBERS` = comma-separated class numbers: for any course with a number listed, only those
+  sections are watched (use it to drop sections that clash with your schedule). A number that matches nothing
+  triggers a "BROKEN" alert, so typos don't silently narrow what you're watching.
 - Secrets tab: `NTFY_TOPIC` = your topic name, `HEALTHCHECK_URL` = your ping URL.
 
 **5. Test it.** Actions tab → *Waitlist watcher* → **Run workflow**. Within a minute or two you should get either
@@ -41,4 +44,7 @@ and pause the check on healthchecks.io so it doesn't email you.
 - GitHub sometimes starts scheduled runs a few minutes late. Fine for this; don't expect exact 15-minute spacing.
 - The data source is UF's public course-search backend, which is unofficial and can change without notice.
   That's exactly what the "BROKEN" alert is for.
-- Test locally: `COURSE_CODE=COP4600 NTFY_TOPIC=your-topic MODE=status python3 watch_waitlist.py`
+- Sections UF labels "Departmentally Controlled" are skipped until the label goes away (they can't be joined
+  and their empty waitlists are meaningless). Once released, they're watched like any other section.
+- If one course fails to load, the others are still checked and still alert; you get both pushes.
+- Test locally: `COURSE_CODES=COP4600,PHI3681 NTFY_TOPIC=your-topic MODE=status python3 watch_waitlist.py`
