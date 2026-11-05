@@ -1,14 +1,11 @@
 name: Waitlist watcher
 
 on:
-  schedule:
-    - cron: "4,19,34,49 * * * *"   # every 15 min, off the :00/:15/:30/:45 rush when GitHub delays or drops runs
-    - cron: "7 13 * * *"     # 13:07 UTC = 8:07 a.m. Eastern: the daily "still watching" push
-  workflow_dispatch:          # "Run workflow" button, and the hook cron-job.org calls
+  workflow_dispatch:          # started by cron-job.org (and the "Run workflow" button for tests)
     inputs:
       mode:
-        description: "status = always send the OK push (testing); check = only push on news"
-        default: "status"     # the button defaults to a visible test; cron-job.org sends "check"
+        description: "status = always send the OK message; check = only message on news"
+        default: "status"     # the button defaults to a visible test
         type: choice
         options: [status, check]
 
@@ -24,9 +21,7 @@ jobs:
           UF_TERM: ${{ vars.UF_TERM }}              # repo variable, e.g. 2271
           COURSE_CODES: ${{ vars.COURSE_CODES }}    # repo variable, comma-separated, e.g. COP4600,PHI3681
           CLASS_NUMBERS: ${{ vars.CLASS_NUMBERS }}  # repo variable, optional: only these sections of their course
-          COURSE_CODE: ${{ vars.COURSE_CODE }}      # older single-course setting, still honored
-          CLASS_NUMBER: ${{ vars.CLASS_NUMBER }}
-          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}     # secret, so it's hidden in a public repo
-          HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}  # secret, optional
-          # Daily run sends the "OK" push; dispatched runs use their mode input; 15-minute runs stay quiet unless there's news.
-          MODE: ${{ github.event.schedule == '7 13 * * *' && 'status' || inputs.mode || 'check' }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}  # secret, so it's hidden in a public repo
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}      # secret
+          HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}        # secret
+          MODE: ${{ inputs.mode || 'check' }}       # cron-job.org sends "check" every 15 min and "status" daily

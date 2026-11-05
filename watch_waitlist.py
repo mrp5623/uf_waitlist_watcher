@@ -1,34 +1,30 @@
 #!/usr/bin/env python3
 """
-Watch UF course waitlists and push a phone alert when a spot opens in any watched section.
+Watch UF course waitlists and send a Telegram alert when a spot opens in any watched section.
 
 Reads UF's public Schedule of Courses (no login, no GatorLink, no Duo).
 It never registers or joins anything for you; it only tells you to go do it.
 
 Three ways you find out if it breaks:
-  1. Any error  -> "Watcher is BROKEN" push to your phone + the GitHub run fails.
-  2. Every morning -> a low-priority "still full, still watching" push.
-     If that push doesn't show up, something is wrong.
-  3. healthchecks.io (optional but recommended) emails you if the script
-     hasn't reported a successful check in ~an hour, which catches the case
-     where the script stops running entirely.
+  1. Any error  -> "Watcher is BROKEN" message + the GitHub run fails.
+  2. Every morning -> a "still full, still watching" message. If it doesn't show up, something is wrong.
+  3. healthchecks.io emails you if no successful check has arrived in ~an hour,
+     which catches the case where the script stops running entirely.
 """
 import json                    # parse UF's JSON response
 import os                      # read settings from environment variables
 import sys                     # exit with a failure code on errors
-import urllib.parse            # build the query string safely
+import urllib.error            # catch HTTP errors to report Telegram's reason
+import urllib.parse            # build the query string and form data safely
 import urllib.request          # make HTTP requests (no pip installs needed)
 
 SOC_URL = "https://one.ufl.edu/apix/soc/schedule/"   # UF's public course-search backend
 USER_AGENT = "personal-waitlist-watcher (a few requests per 15 min)"  # be identifiable and polite
 
 
-def setting(name, default=None, required=False):
-    """Read one setting from the environment; stop with a clear message if a required one is missing."""
-    value = os.environ.get(name) or default          # empty string counts as "not set"
-    if required and not value:
-        raise SystemExit(f"Missing required setting: {name}")
-    return value
+def setting(name, default=None):
+    """Read one setting from the environment (an empty string counts as "not set")."""
+    return os.environ.get(name) or default
 
 
 def split_list(text):
@@ -36,14 +32,14 @@ def split_list(text):
     return [item.replace(" ", "").upper() for item in (text or "").split(",") if item.strip()]
 
 
-# ---- Settings (set these as GitHub repo variables/secrets, or export them locally) ----
+# ---- Settings (GitHub repo variables/secrets, or exported locally) ----
 UF_TERM = setting("UF_TERM", "2271")                 # term code: 2 + YY + (1 Spring, 5 Summer, 8 Fall); 2271 = Spring 2027
-# One or more course codes, comma-separated. COURSE_CODE (singular) still works from the first version.
-COURSES = split_list(setting("COURSE_CODES") or setting("COURSE_CODE", required=True))
-# Optional, comma-separated class numbers. For any course that has a listed number, only those sections
-# are watched (use this to skip sections that clash with your schedule). Courses with none listed: all sections.
-ONLY_SECTIONS = set(split_list(setting("CLASS_NUMBERS") or setting("CLASS_NUMBER")))
-NTFY_TOPIC = setting("NTFY_TOPIC", required=True)    # your private ntfy.sh topic name (treat it like a password)
+COURSES = split_list(setting("COURSE_CODES"))        # comma-separated, e.g. "COP4600,PHI3681"; checked in main()
+# Optional, comma-separated class numbers. For any course with a listed number, only those sections are
+# watched (use this to skip sections that clash with your schedule). Courses with none listed: all sections.
+ONLY_SECTIONS = set(split_list(setting("CLASS_NUMBERS")))
+TELEGRAM_TOKEN = setting("TELEGRAM_BOT_TOKEN")       # from @BotFather; anyone with it can control the bot, so keep it secret
+TELEGRAM_CHAT = setting("TELEGRAM_CHAT_ID")          # your chat with the bot; messages go only here
 HEALTHCHECK_URL = setting("HEALTHCHECK_URL")         # optional healthchecks.io ping URL
 MODE = setting("MODE", "check")                      # "check" = alert only on news; "status" = also send the daily OK
 
@@ -55,15 +51,20 @@ def get_json(url):
         return json.load(resp)
 
 
-def notify(title, message, priority="default", tags=""):
-    """Send a push notification through ntfy.sh to the phone app subscribed to NTFY_TOPIC."""
-    req = urllib.request.Request(
-        f"https://ntfy.sh/{NTFY_TOPIC}",
-        data=message.encode("utf-8"),                        # the body is the notification text
-        headers={"Title": title, "Priority": priority, "Tags": tags},
-        method="POST",
-    )
-    urllib.request.urlopen(req, timeout=30).close()
+def notify(title, message):
+    """Send a Telegram message from your bot to your chat."""
+    if not (TELEGRAM_TOKEN and TELEGRAM_CHAT):
+        raise RuntimeError("Telegram secrets not set")
+    data = urllib.parse.urlencode({                          # Telegram takes ordinary form fields
+        "chat_id": TELEGRAM_CHAT,                            # who receives it
+        "text": f"{title}\n{message}",                       # plain text: first line acts as the title
+    }).encode("utf-8")
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        urllib.request.urlopen(url, data=data, timeout=30).close()   # passing data makes this a POST
+    except urllib.error.HTTPError as exc:
+        # Report Telegram's own reason (e.g. "chat not found") without printing the URL, which holds the token.
+        raise RuntimeError(f"Telegram refused the message: {exc.code} {exc.read().decode(errors='replace')[:200]}")
 
 
 def ping_healthcheck(suffix=""):
@@ -118,9 +119,15 @@ def read_sections(course):
 
 def main():
     errors = []        # problems to report as BROKEN
-    news = []          # lines worth an urgent push
+    news = []          # lines worth a spot-open alert
     summary = []       # one line per course for the daily OK
     seen = set()       # every class number we found, to catch typos in CLASS_NUMBERS
+
+    # Settings problems go through the same BROKEN path as everything else instead of exiting silently.
+    if not COURSES:
+        errors.append("No courses set: add a COURSE_CODES repo variable (Variables tab, not Secrets).")
+    if not (TELEGRAM_TOKEN and TELEGRAM_CHAT):
+        errors.append("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID secret is missing, so no alerts can be sent.")
 
     for course in COURSES:
         try:
@@ -155,23 +162,28 @@ def main():
 
     if news:
         # The thing you care about. Repeats every run until those waitlists are full again.
-        notify("Waitlist spot open!", "\n".join(news) + "\nJoin in ONE.UF now.",
-               priority="urgent", tags="rotating_light")
+        try:
+            notify("🚨 Waitlist spot open!", "\n".join(news) + "\nJoin in ONE.UF now.")
+        except Exception as exc:
+            errors.append(f"Couldn't send the spot-open alert: {exc}")   # falls through to the BROKEN path
+
+    if MODE == "status" and not news and not errors:
+        # Layer 2: daily proof of life.
+        try:
+            notify("✅ Watcher OK", "\n".join(summary) + "\nChecking every 15 min.")
+        except Exception as exc:
+            errors.append(f"Couldn't send the daily OK: {exc}")
 
     if errors:
         # Layer 1: loud alert, then fail the run so GitHub shows a red X.
         print("ERROR: " + " | ".join(errors))
         try:
-            notify("Waitlist watcher is BROKEN", "\n".join(errors) + "\nCheck ONE.UF manually until it's fixed.",
-                   priority="high", tags="warning")
+            notify("⚠️ Waitlist watcher is BROKEN", "\n".join(errors) + "\nCheck ONE.UF manually until it's fixed.")
         except Exception as notify_exc:
-            print(f"(couldn't send error push either: {notify_exc})")
+            # Telegram itself is down or misconfigured; the /fail ping below makes healthchecks.io email you.
+            print(f"(couldn't send error alert either: {notify_exc})")
         ping_healthcheck("/fail")
         sys.exit(1)
-
-    if MODE == "status" and not news:
-        # Layer 2: daily proof of life.
-        notify("Watcher OK", "\n".join(summary) + "\nChecking every 15 min.", priority="low", tags="white_check_mark")
 
     ping_healthcheck()   # Layer 3: "I ran and it worked"
 
