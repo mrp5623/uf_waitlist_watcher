@@ -2,9 +2,15 @@ name: Waitlist watcher
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # every 15 minutes (GitHub may run it a few minutes late under load)
+    - cron: "4,19,34,49 * * * *"   # every 15 min, off the :00/:15/:30/:45 rush when GitHub delays or drops runs
     - cron: "7 13 * * *"     # 13:07 UTC = 8:07 a.m. Eastern: the daily "still watching" push
-  workflow_dispatch:          # adds a "Run workflow" button so you can test it by hand
+  workflow_dispatch:          # "Run workflow" button, and the hook cron-job.org calls
+    inputs:
+      mode:
+        description: "status = always send the OK push (testing); check = only push on news"
+        default: "status"     # the button defaults to a visible test; cron-job.org sends "check"
+        type: choice
+        options: [status, check]
 
 jobs:
   check:
@@ -22,5 +28,5 @@ jobs:
           CLASS_NUMBER: ${{ vars.CLASS_NUMBER }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}     # secret, so it's hidden in a public repo
           HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}  # secret, optional
-          # Daily run and manual runs send the "OK" push; the 15-minute runs stay quiet unless there's news.
-          MODE: ${{ (github.event_name == 'workflow_dispatch' || github.event.schedule == '7 13 * * *') && 'status' || 'check' }}
+          # Daily run sends the "OK" push; dispatched runs use their mode input; 15-minute runs stay quiet unless there's news.
+          MODE: ${{ github.event.schedule == '7 13 * * *' && 'status' || inputs.mode || 'check' }}
