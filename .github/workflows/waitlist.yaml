@@ -1,0 +1,24 @@
+name: Waitlist watcher
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # every 15 minutes (GitHub may run it a few minutes late under load)
+    - cron: "7 13 * * *"     # 13:07 UTC = 8:07 a.m. Eastern: the daily "still watching" push
+  workflow_dispatch:          # adds a "Run workflow" button so you can test it by hand
+
+jobs:
+  check:
+    runs-on: ubuntu-latest   # GitHub's free Linux runner; Python 3 is preinstalled
+    timeout-minutes: 3        # kill a hung run instead of letting it sit
+    steps:
+      - uses: actions/checkout@v4          # copy the repo (the script) onto the runner
+      - name: Check the waitlist
+        run: python3 watch_waitlist.py
+        env:
+          UF_TERM: ${{ vars.UF_TERM }}              # repo variable, e.g. 2271
+          COURSE_CODE: ${{ vars.COURSE_CODE }}      # repo variable, e.g. COP4600
+          CLASS_NUMBER: ${{ vars.CLASS_NUMBER }}    # repo variable, optional
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}     # secret, so it's hidden in a public repo
+          HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}  # secret, optional
+          # Daily run and manual runs send the "OK" push; the 15-minute runs stay quiet unless there's news.
+          MODE: ${{ (github.event_name == 'workflow_dispatch' || github.event.schedule == '7 13 * * *') && 'status' || 'check' }}
