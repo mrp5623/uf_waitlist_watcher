@@ -9,12 +9,22 @@ on:
         type: choice
         options: [status, check]
 
+concurrency:
+  group: waitlist-watcher     # one run at a time, so two runs never read/write the alert state at once
+  cancel-in-progress: false   # queue the next run instead of killing the current one
+
 jobs:
   check:
     runs-on: ubuntu-latest   # GitHub's free Linux runner; Python 3 is preinstalled
     timeout-minutes: 3        # kill a hung run instead of letting it sit
     steps:
       - uses: actions/checkout@v4          # copy the repo (the script) onto the runner
+      - name: Restore last run's alert state
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: waitlist-state-${{ github.run_id }}   # never matches exactly...
+          restore-keys: waitlist-state-               # ...so it falls back to the newest saved state
       - name: Check the waitlist
         run: python3 watch_waitlist.py
         env:
@@ -25,3 +35,9 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}      # secret
           HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}        # secret
           MODE: ${{ inputs.mode || 'check' }}       # cron-job.org sends "check" every 15 min and "status" daily
+      - name: Save alert state for the next run
+        if: always() && hashFiles('state.json') != ''   # even after a failed run, as long as a state file exists
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: waitlist-state-${{ github.run_id }}   # a new key each run; GitHub evicts old ones on its own

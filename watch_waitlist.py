@@ -14,6 +14,7 @@ Three ways you find out if it breaks:
 import json                    # parse UF's JSON response
 import os                      # read settings from environment variables
 import sys                     # exit with a failure code on errors
+import time                    # timestamps for "when did I last alert about this section"
 import urllib.error            # catch HTTP errors to report Telegram's reason
 import urllib.parse            # build the query string and form data safely
 import urllib.request          # make HTTP requests (no pip installs needed)
@@ -35,13 +36,34 @@ def split_list(text):
 # ---- Settings (GitHub repo variables/secrets, or exported locally) ----
 UF_TERM = setting("UF_TERM", "2271")                 # term code: 2 + YY + (1 Spring, 5 Summer, 8 Fall); 2271 = Spring 2027
 COURSES = split_list(setting("COURSE_CODES"))        # comma-separated, e.g. "COP4600,PHI3681"; checked in main()
-# Optional, comma-separated class numbers. For any course with a listed number, only those sections are
-# watched (use this to skip sections that clash with your schedule). Courses with none listed: all sections.
-ONLY_SECTIONS = set(split_list(setting("CLASS_NUMBERS")))
+# Optional, comma-separated class numbers, e.g. "19002,~26355".
+#   12345  = watch only the listed sections of that course (other courses are unaffected)
+#   ~12345 = never watch this section (e.g. a time that clashes with your schedule)
+_NUMBERS = split_list(setting("CLASS_NUMBERS"))
+ONLY_SECTIONS = {n for n in _NUMBERS if not n.startswith("~")}
+EXCLUDED = {n.lstrip("~") for n in _NUMBERS if n.startswith("~")}
+ALL_FOUND = set()      # every class number UF returned for the watched courses, to catch typos in CLASS_NUMBERS
 TELEGRAM_TOKEN = setting("TELEGRAM_BOT_TOKEN")       # from @BotFather; anyone with it can control the bot, so keep it secret
 TELEGRAM_CHAT = setting("TELEGRAM_CHAT_ID")          # your chat with the bot; messages go only here
 HEALTHCHECK_URL = setting("HEALTHCHECK_URL")         # optional healthchecks.io ping URL
 MODE = setting("MODE", "check")                      # "check" = alert only on news; "status" = also send the daily OK
+STATE_FILE = setting("STATE_FILE", "state.json")     # what was alerted last run; the workflow carries it between runs
+REMIND_SECONDS = 2 * 60 * 60                         # repeat an unchanged opening every 2 hours, not every run
+
+
+def load_state():
+    """Return {class_number: {"seen": "11/12", "alerted_at": epoch}} from the last run, or {} on the first run."""
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):                    # missing or corrupt file: start fresh (worst case, one extra alert)
+        return {}
+
+
+def save_state(state):
+    """Write the state for the next run to pick up."""
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
 
 
 def get_json(url):
@@ -84,7 +106,7 @@ def is_held(section):
 
 
 def read_sections(course):
-    """Return [(class_number, cap, total, held), ...] for the watched sections of one course, or raise with a reason."""
+    """Return [(class_number, cap, total, held, joinable), ...] for the watched sections of one course, or raise."""
     query = urllib.parse.urlencode({
         "category": "CWSP",          # main campus / standard courses
         "term": UF_TERM,
@@ -103,9 +125,15 @@ def read_sections(course):
     if not sections:
         raise RuntimeError(f"{course} has no sections listed.")
 
+    ALL_FOUND.update(str(s.get("classNumber")) for s in sections)  # before filtering, so excluded ones count as found
+
     picked = [s for s in sections if str(s.get("classNumber")) in ONLY_SECTIONS]
     if picked:
         sections = picked                                           # you named specific sections of this course
+    sections = [s for s in sections if str(s.get("classNumber")) not in EXCLUDED]   # drop the ~ ones
+    if not sections:
+        raise RuntimeError(f"Every section of {course} is excluded by CLASS_NUMBERS. "
+                           "Remove it from COURSE_CODES instead, or drop a ~ number.")
 
     results = []
     for s in sections:
@@ -113,15 +141,17 @@ def read_sections(course):
         if not isinstance(wl, dict) or "cap" not in wl or "total" not in wl:
             raise RuntimeError(f"{course} #{s.get('classNumber')}: no usable waitList data (got {wl!r}). "
                                "UF may have changed the API.")
-        results.append((str(s.get("classNumber")), int(wl["cap"]), int(wl["total"]), is_held(s)))
+        # UF's own "can someone join this waitlist now" flag. "N" = not joinable even if the count shows room
+        # (e.g. a spot held while the next student decides). Missing flag: trust the count, as before.
+        joinable = wl.get("isEligible") != "N"
+        results.append((str(s.get("classNumber")), int(wl["cap"]), int(wl["total"]), is_held(s), joinable))
     return results
 
 
 def main():
     errors = []        # problems to report as BROKEN
-    news = []          # lines worth a spot-open alert
+    news = []          # (class_number, "11/12", line) for every section with a joinable spot right now
     summary = []       # one line per course for the daily OK
-    seen = set()       # every class number we found, to catch typos in CLASS_NUMBERS
 
     # Settings problems go through the same BROKEN path as everything else instead of exiting silently.
     if not COURSES:
@@ -137,8 +167,8 @@ def main():
             continue
         news_before = len(news)                              # to tell whether this course added any news
         held_count = 0                                       # dept-controlled sections, reported in the daily OK
-        for number, cap, total, held in sections:
-            seen.add(number)
+        not_joinable = []                                    # room in the count but UF says not joinable
+        for number, cap, total, held, joinable in sections:
             print(f"{course} #{number}: waitlist {total}/{cap}" + ("  [departmentally controlled]" if held else ""))
             if held:
                 # Not joinable yet, and its empty waitlist means nothing, so stay quiet. The moment UF drops
@@ -147,25 +177,46 @@ def main():
                 held_count += 1
             elif cap == 0:
                 # No waitlist capacity listed: either seats opened (waitlist goes away) or it was turned off.
-                news.append(f"{course} #{number}: waitlist shows 0 capacity (seats may be open). Check ONE.UF.")
+                news.append((number, "0/0", f"{course} #{number}: waitlist shows 0 capacity (seats may be open). Check ONE.UF."))
+            elif total < cap and not joinable:
+                # The count dipped but UF won't let anyone new join, so no alert; it's noted in the daily OK.
+                not_joinable.append(f"#{number} {total}/{cap}")
             elif total < cap:
-                news.append(f"{course} #{number}: {cap - total} waitlist spot(s) open ({total}/{cap}).")
+                news.append((number, f"{total}/{cap}", f"{course} #{number}: {cap - total} waitlist spot(s) open ({total}/{cap})."))
         if len(news) == news_before:
             line = f"{course}: {len(sections) - held_count} section(s), all full"
             if held_count:
                 line += f"; {held_count} departmentally controlled (not open yet)"
+            if not_joinable:
+                line += f"; {', '.join(not_joinable)} shows room but UF says not joinable"
             summary.append(line)
 
-    missing = sorted(ONLY_SECTIONS - seen)
+    missing = sorted((ONLY_SECTIONS | EXCLUDED) - ALL_FOUND)  # typos in either kind of entry
     if missing and not errors:                               # only meaningful if every course loaded
         errors.append(f"Class number(s) not found in any watched course: {', '.join(missing)}")
 
-    if news:
-        # The thing you care about. Repeats every run until those waitlists are full again.
+    # Decide which openings to (re)announce: new or changed ones right away, unchanged ones every 2 hours.
+    # The daily status run always repeats all current openings.
+    state, now = load_state(), time.time()
+    due = [(n, seen, line) for n, seen, line in news
+           if MODE == "status"
+           or state.get(n, {}).get("seen") != seen
+           or now - state.get(n, {}).get("alerted_at", 0) >= REMIND_SECONDS]
+    for n, seen, _ in news:
+        if not any(n == d[0] for d in due):
+            print(f"#{n} {seen}: already alerted, next reminder within 2 hours")
+    if due:
         try:
-            notify("🚨 Waitlist spot open!", "\n".join(news) + "\nJoin in ONE.UF now.")
+            notify("🚨 Waitlist spot open!", "\n".join(line for _, _, line in due) + "\nJoin in ONE.UF now.")
+            for n, seen, _ in due:
+                state[n] = {"seen": seen, "alerted_at": now}    # only recorded once the alert actually went out
         except Exception as exc:
             errors.append(f"Couldn't send the spot-open alert: {exc}")   # falls through to the BROKEN path
+    open_now = {n for n, _, _ in news}
+    if not errors or open_now:
+        # Forget sections that filled back up, so a later reopening alerts immediately. Skipped when a course
+        # failed to load and nothing is open, so a UF hiccup can't wipe the record and cause a repeat alert.
+        save_state({n: v for n, v in state.items() if n in open_now})
 
     if MODE == "status" and not news and not errors:
         # Layer 2: daily proof of life.

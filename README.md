@@ -22,8 +22,9 @@ then get your chat ID from `https://api.telegram.org/botYOUR_TOKEN/getUpdates` (
 Then Settings → Secrets and variables → Actions:
 
 - Variables: `UF_TERM` = `2271` (Spring 2027), `COURSE_CODES` = e.g. `COP4600,PHI3681`.
-  Optional `CLASS_NUMBERS`: for any course with a number listed, only those sections are watched
-  (to drop sections that clash with your schedule). A number that matches nothing triggers a "BROKEN" alert.
+  Optional `CLASS_NUMBERS`, comma-separated: `12345` = watch only the listed sections of that course;
+  `~12345` = never watch that section. Courses with nothing listed watch every section.
+  A number (either kind) that matches nothing triggers a "BROKEN" alert, so typos don't go unnoticed.
 - Secrets: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `HEALTHCHECK_URL`.
 
 **4. Trigger (cron-job.org).** GitHub's own scheduler proved unreliable, so cron-job.org starts each run.
@@ -40,7 +41,10 @@ Make a fine-grained GitHub token limited to this repo with *Actions: Read and wr
 
 ## Notes
 
-- The spot-open alert repeats every 15 minutes until that waitlist is full again.
+- A spot-open alert goes out as soon as a section opens or its count changes, then repeats every 2 hours
+  while nothing changes (and in the daily run). The workflow keeps that memory in a GitHub Actions cache.
+- UF's public data can briefly disagree with ONE.UF (e.g. while an offered seat is pending). If an alert
+  doesn't match ONE.UF, try Join Waitlist anyway; the alert won't repeat for 2 hours unless the count changes.
 - Sections labeled "Departmentally Controlled" are skipped until UF removes the label; then they're watched normally.
 - If one course fails to load, the others are still checked; you get both the spot-open and BROKEN alerts.
 - The data source is UF's unofficial public course-search backend and can change without notice.
